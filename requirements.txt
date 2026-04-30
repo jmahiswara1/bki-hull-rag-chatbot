@@ -4,3 +4,4 @@ langchain-ollama
 langchain-chroma
 chromadb
 pymupdf
+rich

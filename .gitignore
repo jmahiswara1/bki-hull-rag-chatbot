@@ -31,6 +31,10 @@ chroma_db_v2/
 
 # Local source documents and testing PDFs
 data/*.pdf
+data/*.json
+data/*.txt
+data/*.md
+data/*.docx
 
 # Logs and temporary files
 *.log

@@ -1,20 +1,36 @@
-import itertools
 import json
 import re
 import sys
-import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator
 
 from langchain_core.documents import Document
+
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.markup import escape
+    from rich.panel import Panel
+    from rich.rule import Rule
+    from rich.table import Table
+except ImportError:
+    Console = None
+    Markdown = None
+    escape = None
+    Panel = None
+    Rule = None
+    Table = None
 
 from llm import FALLBACK_LLM_MODEL, get_llm_with_fallback
 from pdf_questions import load_questions_from_pdf
 from retriever import retrieve_candidates, retrieve_context, rerank_documents
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RICH_AVAILABLE = Console is not None
+console = Console() if RICH_AVAILABLE else None
+error_console = Console(stderr=True) if RICH_AVAILABLE else None
 NORMAL_MODE = "normal"
 FAST_MODE = "fast"
 LLAMA_MODE = "llama"
@@ -74,51 +90,125 @@ INDONESIAN_MARKERS = (
 )
 
 
+def rich_escape(value: str) -> str:
+    if escape is None:
+        return value
+
+    return escape(value)
+
+
+def mode_badge(mode: str) -> str:
+    if not RICH_AVAILABLE:
+        return f"[{mode}]"
+
+    styles = {
+        NORMAL_MODE: "bold cyan",
+        FAST_MODE: "bold green",
+        LLAMA_MODE: "bold magenta",
+    }
+    style = styles.get(mode, "bold cyan")
+    return f"[{style}]{rich_escape(f'[{mode}]')}[/{style}]"
+
+
+def print_status(message: str, style: str = "cyan") -> None:
+    if console is None:
+        print(message)
+        return
+
+    console.print(message, style=style)
+
+
+def print_error(message: str) -> None:
+    if error_console is None or Panel is None:
+        print(message, file=sys.stderr)
+        return
+
+    error_console.print(Panel(message, title="Error", border_style="red"))
+
+
+def print_panel(title: str, body: str, style: str = "cyan") -> None:
+    if console is None or Panel is None:
+        print(title)
+        print(body)
+        return
+
+    console.print(Panel(body, title=title, border_style=style))
+
+
+def print_rule(title: str) -> None:
+    if console is None or Rule is None:
+        print(f"\n=== {title} ===")
+        return
+
+    console.print(Rule(title, style="dim"))
+
+
+def prompt_user(mode: str) -> str:
+    prompt = f"\n{mode_badge(mode)} [bold]You[/bold] > " if RICH_AVAILABLE else f"\n[{mode}] You > "
+
+    if console is None:
+        return input(prompt).strip()
+
+    return console.input(prompt).strip()
+
+
+def parse_command(user_input: str) -> tuple[str, str]:
+    command, _, args = user_input.partition(" ")
+    return command.lower(), args.strip()
+
+
 def print_welcome() -> None:
-    print("BKI Hull Rules Chatbot CLI v0")
-    print("Ask questions in Bahasa Indonesia or English.")
-    print("Type /help for commands, /quit or /exit to leave.")
+    body = "\n".join(
+        [
+            "Ask questions in Bahasa Indonesia or English.",
+            "Type /help for commands, /quit or /exit to leave.",
+            "Modes: normal, fast, llama.",
+        ]
+    )
+    print_panel("BKI Hull Rules Chatbot CLI", body, "cyan")
 
 
 def print_help() -> None:
-    print("Available commands:")
-    print("  /help                    Show this help message")
-    print("  /clear                   Clear conversation history")
-    print("  /fast                    Use qwen2.5:3b with grounded concise answers")
-    print("  /llama                   Use llama3.2:3b with grounded concise answers")
-    print("  /normal                  Use qwen2.5:7b fallback with deeper retrieval")
-    print("  /debug-retrieve <q>      Show retrieved chunks and scores for a question")
-    print("  /import-json [path]      Ask independent questions from JSON, default: questions.json")
-    print("  /import-pdf [path]       Ask independent questions from PDF, default: data/AI testing.pdf")
-    print("  /quit                    Exit the chatbot")
-    print("  /exit                    Exit the chatbot")
+    if console is None or Table is None:
+        print("Available commands:")
+        print("  /help                    Show this help message")
+        print("  /clear                   Clear conversation history")
+        print("  /fast                    Use qwen2.5:3b with grounded concise answers")
+        print("  /llama                   Use llama3.2:3b with grounded concise answers")
+        print("  /normal                  Use qwen2.5:7b fallback with deeper retrieval")
+        print("  /debug-retrieve <q>      Show retrieved chunks and scores for a question")
+        print("  /import-json [path]      Ask independent questions from JSON, default: data/questions.json")
+        print("  /import-pdf [path]       Ask independent questions from PDF, default: data/AI testing.pdf")
+        print("  /quit                    Exit the chatbot")
+        print("  /exit                    Exit the chatbot")
+        return
+
+    table = Table(title="Available commands", show_header=True, header_style="bold cyan")
+    table.add_column("Group", style="dim", no_wrap=True)
+    table.add_column("Command", style="bold")
+    table.add_column("Description")
+    table.add_row("Conversation", "/help", "Show this help message")
+    table.add_row("Conversation", "/clear", "Clear conversation history")
+    table.add_row("Modes", "/fast", "Use qwen2.5:3b with grounded concise answers")
+    table.add_row("Modes", "/llama", "Use llama3.2:3b with grounded concise answers")
+    table.add_row("Modes", "/normal", "Use qwen2.5:7b fallback with deeper retrieval")
+    table.add_row("Retrieval", "/debug-retrieve <q>", "Show retrieved chunks and scores for a question")
+    table.add_row("Import", rich_escape("/import-json [path]"), "Ask independent questions from JSON, default: data/questions.json")
+    table.add_row("Import", rich_escape("/import-pdf [path]"), "Ask independent questions from PDF, default: data/AI testing.pdf")
+    table.add_row("Exit", "/quit", "Exit the chatbot")
+    table.add_row("Exit", "/exit", "Exit the chatbot")
+    console.print(table)
 
 
 @contextmanager
-def show_loading() -> Iterator[None]:
-    if not sys.stdout.isatty():
+def show_loading() -> Generator[None, None, None]:
+    if console is None or not sys.stdout.isatty():
         print("...", flush=True)
         yield
         return
 
-    stop_event = threading.Event()
-
-    def animate() -> None:
-        for dots in itertools.cycle((".", "..", "...")):
-            if stop_event.is_set():
-                break
-            print(f"\r{dots:<3}", end="", flush=True)
-            time.sleep(0.35)
-
-    thread = threading.Thread(target=animate, daemon=True)
-    thread.start()
-
-    try:
+    with console.status("Retrieving context and asking model...", spinner="dots"):
         yield
-    finally:
-        stop_event.set()
-        thread.join()
-        print("\r   \r", end="", flush=True)
 
 
 def get_mode_config(mode: str) -> dict[str, Any]:
@@ -211,7 +301,7 @@ def format_context(documents: list[Document]) -> str:
     return "\n\n".join(chunks)
 
 
-def format_sources(documents: list[Document]) -> str:
+def collect_sources(documents: list[Document]) -> list[tuple[int, str, str]]:
     seen: set[tuple[str, str]] = set()
     sources: list[tuple[int, str, str]] = []
 
@@ -232,11 +322,37 @@ def format_sources(documents: list[Document]) -> str:
 
         sources.append((page_number, source, page))
 
+    return sorted(sources)
+
+
+def format_sources(documents: list[Document]) -> str:
+    sources = collect_sources(documents)
+
     if not sources:
         return ""
 
-    lines = [f"- {source}, page {page}" for _, source, page in sorted(sources)]
+    lines = [f"- {source}, page {page}" for _, source, page in sources]
     return "Sources:\n" + "\n".join(lines)
+
+
+def print_sources(documents: list[Document]) -> None:
+    sources = collect_sources(documents)
+
+    if not sources:
+        return
+
+    if console is None or Table is None:
+        print(f"\n{format_sources(documents)}")
+        return
+
+    table = Table(title="Sources", show_header=True, header_style="bold cyan")
+    table.add_column("Source")
+    table.add_column("Page", justify="right")
+
+    for _, source, page in sources:
+        table.add_row(source, page)
+
+    console.print(table)
 
 
 def resolve_input_path(path_text: str, default_path: str) -> Path:
@@ -256,7 +372,7 @@ def resolve_input_path(path_text: str, default_path: str) -> Path:
 
 
 def resolve_json_path(path_text: str) -> Path:
-    return resolve_input_path(path_text, "questions.json")
+    return resolve_input_path(path_text, "data/questions.json")
 
 
 def resolve_pdf_path(path_text: str) -> Path:
@@ -397,17 +513,20 @@ def answer_user_question(
             answer, documents = generate_answer(user_input, history, llm, mode, use_history)
     except Exception as exc:
         elapsed_seconds = time.perf_counter() - started_at
-        print(f"Error after {elapsed_seconds:.2f} seconds: {exc}", file=sys.stderr)
+        print_error(f"Error after {elapsed_seconds:.2f} seconds: {exc}")
         return history
 
     elapsed_seconds = time.perf_counter() - started_at
-    print("\nAssistant:")
-    print(answer)
-    print(f"\nResponse time: {elapsed_seconds:.2f} secs")
-    sources = format_sources(documents)
 
-    if sources:
-        print(f"\n{sources}")
+    if console is None or Panel is None:
+        print("\nAssistant:")
+        print(answer)
+    else:
+        renderable = Markdown(answer) if Markdown is not None else answer
+        console.print(Panel(renderable, title="Assistant", border_style="cyan"))
+
+    print_status(f"Response time: {elapsed_seconds:.2f} secs", "dim")
+    print_sources(documents)
 
     if not append_history:
         return history
@@ -423,8 +542,8 @@ def ask_independent_questions(
     mode: str,
 ) -> None:
     for index, question in enumerate(questions, start=1):
-        print(f"\n=== Question {index}/{len(questions)} ===")
-        print(f"You: {question}")
+        print_rule(f"Question {index}/{len(questions)}")
+        print_status(f"You: {question}", "bold")
         answer_user_question(
             question,
             history,
@@ -445,16 +564,16 @@ def import_json_questions(
         file_path = resolve_json_path(path_text)
         questions = load_questions_from_json(file_path)
     except Exception as exc:
-        print(f"Import JSON failed: {exc}", file=sys.stderr)
+        print_error(f"Import JSON failed: {exc}")
         return history
 
     if not questions:
-        print("JSON file contains no questions.")
+        print_status("JSON file contains no questions.", "yellow")
         return history
 
-    print(f"Importing {len(questions)} independent questions from {file_path}")
+    print_status(f"Importing {len(questions)} independent questions from {file_path}", "cyan")
     ask_independent_questions(questions, history, llm_cache, mode)
-    print(f"\nFinished importing {len(questions)} questions. Interactive history was not changed.")
+    print_status(f"\nFinished importing {len(questions)} questions. Interactive history was not changed.", "green")
     return history
 
 
@@ -468,23 +587,23 @@ def import_pdf_questions(
         file_path = resolve_pdf_path(path_text)
         questions = load_questions_from_pdf(file_path)
     except Exception as exc:
-        print(f"Import PDF failed: {exc}", file=sys.stderr)
+        print_error(f"Import PDF failed: {exc}")
         return history
 
     if not questions:
-        print("PDF file contains no detected questions.")
+        print_status("PDF file contains no detected questions.", "yellow")
         return history
 
-    print(f"Importing {len(questions)} independent questions from {file_path}")
-    print("PDF testing is used only as a question source; answers still use the BKI vector store.")
+    print_status(f"Importing {len(questions)} independent questions from {file_path}", "cyan")
+    print_status("PDF testing is used only as a question source; answers still use the BKI vector store.", "dim")
     ask_independent_questions(questions, history, llm_cache, mode)
-    print(f"\nFinished importing {len(questions)} questions. Interactive history was not changed.")
+    print_status(f"\nFinished importing {len(questions)} questions. Interactive history was not changed.", "green")
     return history
 
 
 def print_retrieval_debug(question: str, mode: str) -> None:
     if not question.strip():
-        print("Usage: /debug-retrieve <question>")
+        print_status("Usage: /debug-retrieve <question>", "yellow")
         return
 
     config = get_mode_config(mode)
@@ -492,10 +611,10 @@ def print_retrieval_debug(question: str, mode: str) -> None:
     documents = rerank_documents(question, candidates, final_k=int(config["final_k"]))
 
     if not documents:
-        print("No retrieved chunks.")
+        print_status("No retrieved chunks.", "yellow")
         return
 
-    print(f"Retrieval debug for mode: {mode}")
+    print_panel("Retrieval debug", f"Mode: {mode}\nQuery: {question}", "magenta")
 
     for index, document in enumerate(documents, start=1):
         source = document.metadata.get("source", "unknown source")
@@ -504,9 +623,18 @@ def print_retrieval_debug(question: str, mode: str) -> None:
         relevance_score = document.metadata.get("relevance_score", "n/a")
         rerank_score = document.metadata.get("rerank_score", "n/a")
         preview = re.sub(r"\s+", " ", document.page_content.strip())[:500]
-        print(f"\n[{index}] {source}, page {page}, chunk {chunk_index}")
-        print(f"score={relevance_score}, rerank={rerank_score}")
-        print(preview)
+        body = "\n".join(
+            [
+                f"source: {source}",
+                f"page: {page}",
+                f"chunk: {chunk_index}",
+                f"score: {relevance_score}",
+                f"rerank: {rerank_score}",
+                "",
+                preview,
+            ]
+        )
+        print_panel(f"Chunk {index}", body, "dim")
 
 
 def chat_loop() -> int:
@@ -519,62 +647,59 @@ def chat_loop() -> int:
 
     while True:
         try:
-            user_input = input("\nYou: ").strip()
+            user_input = prompt_user(mode)
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
+            print_status("\nGoodbye.", "cyan")
             return 0
 
         if not user_input:
             continue
 
-        command = user_input.lower()
+        command, args = parse_command(user_input)
 
-        if command in {"/quit", "/exit"}:
-            print("Goodbye.")
+        if not args and command in {"/quit", "/exit"}:
+            print_status("Goodbye.", "cyan")
             return 0
 
-        if command == "/help":
+        if not args and command == "/help":
             print_help()
             continue
 
-        if command == "/clear":
+        if not args and command == "/clear":
             history.clear()
-            print("Conversation history cleared.")
+            print_status("Conversation history cleared.", "green")
             continue
 
-        if command == "/fast":
+        if not args and command == "/fast":
             mode = FAST_MODE
             history = history[-get_history_limit(mode):]
-            print(f"Fast mode enabled: {MODE_CONFIGS[FAST_MODE]['description']}.")
+            print_status(f"Fast mode enabled: {MODE_CONFIGS[FAST_MODE]['description']}.", "green")
             continue
 
-        if command == "/llama":
+        if not args and command == "/llama":
             mode = LLAMA_MODE
             history = history[-get_history_limit(mode):]
-            print(f"Llama mode enabled: {MODE_CONFIGS[LLAMA_MODE]['description']}.")
+            print_status(f"Llama mode enabled: {MODE_CONFIGS[LLAMA_MODE]['description']}.", "magenta")
             continue
 
-        if command == "/normal":
+        if not args and command == "/normal":
             mode = NORMAL_MODE
-            print(f"Normal mode enabled: {MODE_CONFIGS[NORMAL_MODE]['description']}.")
+            print_status(f"Normal mode enabled: {MODE_CONFIGS[NORMAL_MODE]['description']}.", "cyan")
             continue
 
-        if command == "/debug-retrieve" or command.startswith("/debug-retrieve "):
-            question = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
+        if command == "/debug-retrieve":
             try:
-                print_retrieval_debug(question, mode)
+                print_retrieval_debug(args, mode)
             except Exception as exc:
-                print(f"Debug retrieval failed: {exc}", file=sys.stderr)
+                print_error(f"Debug retrieval failed: {exc}")
             continue
 
-        if command == "/import-json" or command.startswith("/import-json "):
-            path_text = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
-            history = import_json_questions(path_text, history, llm_cache, mode)
+        if command == "/import-json":
+            history = import_json_questions(args, history, llm_cache, mode)
             continue
 
-        if command == "/import-pdf" or command.startswith("/import-pdf "):
-            path_text = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
-            history = import_pdf_questions(path_text, history, llm_cache, mode)
+        if command == "/import-pdf":
+            history = import_pdf_questions(args, history, llm_cache, mode)
             continue
 
         history = answer_user_question(user_input, history, llm_cache, mode)
