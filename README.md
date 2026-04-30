@@ -1,4 +1,4 @@
-# BKI Hull Rules Chatbot CLI v0
+# BKI Hull Rules Chatbot CLI
 
 CLI chatbot berbasis RAG untuk menjawab pertanyaan teknis dari dokumen BKI Rules for Hull 2026 menggunakan LLM lokal via Ollama.
 
@@ -63,7 +63,7 @@ Command CLI:
 /llama                   Use llama3.2:3b with grounded concise answers
 /normal                  Use qwen2.5:7b fallback with deeper retrieval
 /debug-retrieve <q>      Show retrieved chunks and scores for a question
-/import-json [path]      Ask independent questions from JSON, default: questions.json
+/import-json [path]      Ask independent questions from JSON, default: data/questions.json
 /import-pdf [path]       Ask independent questions from PDF, default: data/AI testing.pdf
 /quit                    Exit
 /exit                    Exit
@@ -71,7 +71,7 @@ Command CLI:
 
 ## Testing Batch
 
-Untuk menjalankan daftar pertanyaan di `questions.json`:
+Untuk menjalankan daftar pertanyaan di `data/questions.json`:
 
 ```text
 /import-json
@@ -96,7 +96,7 @@ Semua mode memakai guardrail yang sama: jawaban harus didukung retrieved context
 - `/llama` cocok untuk pembanding cepat memakai `llama3.2:3b`.
 - `/debug-retrieve <q>` membantu melihat apakah halaman/chunk yang benar sudah terambil.
 
-## Catatan v0
+## Catatan
 
 - Hanya mendukung satu dokumen PDF BKI Hull 2026.
 - Conversation history hanya tersimpan selama satu sesi.
