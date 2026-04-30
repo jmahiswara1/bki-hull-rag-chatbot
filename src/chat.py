@@ -31,13 +31,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RICH_AVAILABLE = Console is not None
 console = Console() if RICH_AVAILABLE else None
 error_console = Console(stderr=True) if RICH_AVAILABLE else None
-NORMAL_MODE = "normal"
+QWEN_MODE = "qwen"
 FAST_MODE = "fast"
 LLAMA_MODE = "llama"
 LLAMA_MODEL = "llama3.2:3b"
 
 MODE_CONFIGS = {
-    NORMAL_MODE: {
+    QWEN_MODE: {
         "candidate_k": 24,
         "final_k": 8,
         "history_turns": 10,
@@ -157,7 +157,7 @@ def mode_badge(mode: str) -> str:
         return f"[{mode}]"
 
     styles = {
-        NORMAL_MODE: "bold cyan",
+        QWEN_MODE: "bold cyan",
         FAST_MODE: "bold green",
         LLAMA_MODE: "bold magenta",
     }
@@ -217,7 +217,7 @@ def print_welcome() -> None:
         [
             "Ask questions in Bahasa Indonesia or English.",
             "Type /help for commands, /quit or /exit to leave.",
-            "Modes: normal, fast, llama.",
+            "Modes: fast, llama, qwen.",
         ]
     )
     print_panel("BKI Hull Rules Chatbot CLI", body, "cyan")
@@ -238,7 +238,7 @@ def print_help() -> None:
         print("  /clear                   Clear screen and conversation history")
         print("  /fast                    Use qwen2.5:3b with grounded concise answers")
         print("  /llama                   Use llama3.2:3b with grounded concise answers")
-        print("  /normal                  Use qwen2.5:7b fallback with deeper retrieval")
+        print("  /qwen                    Use qwen2.5:7b fallback with deeper retrieval")
         print("  /debug-retrieve <q>      Show retrieved chunks and scores for a question")
         print("  /import-json [path]      Ask independent questions from JSON, default: data/questions.json")
         print("  /import-pdf [path]       Ask independent questions from PDF, default: data/testing.pdf")
@@ -254,7 +254,7 @@ def print_help() -> None:
     table.add_row("Conversation", "/clear", "Clear screen and conversation history")
     table.add_row("Modes", "/fast", "Use qwen2.5:3b with grounded concise answers")
     table.add_row("Modes", "/llama", "Use llama3.2:3b with grounded concise answers")
-    table.add_row("Modes", "/normal", "Use qwen2.5:7b fallback with deeper retrieval")
+    table.add_row("Modes", "/qwen", "Use qwen2.5:7b fallback with deeper retrieval")
     table.add_row("Retrieval", "/debug-retrieve <q>", "Show retrieved chunks and scores for a question")
     table.add_row("Import", rich_escape("/import-json [path]"), "Ask independent questions from JSON, default: data/questions.json")
     table.add_row("Import", rich_escape("/import-pdf [path]"), "Ask independent questions from PDF, default: data/testing.pdf")
@@ -275,7 +275,7 @@ def show_loading() -> Generator[None, None, None]:
 
 
 def get_mode_config(mode: str) -> dict[str, Any]:
-    return MODE_CONFIGS.get(mode, MODE_CONFIGS[NORMAL_MODE])
+    return MODE_CONFIGS.get(mode, MODE_CONFIGS[QWEN_MODE])
 
 
 def get_history_limit(mode: str) -> int:
@@ -883,7 +883,7 @@ def chat_loop() -> int:
     sys.stdout.flush()
 
     llm_cache: dict[str, Any] = {}
-    mode = NORMAL_MODE
+    mode = QWEN_MODE
     history: list[tuple[str, str]] = []
 
     while True:
@@ -925,9 +925,9 @@ def chat_loop() -> int:
             print_status(f"Llama mode enabled: {MODE_CONFIGS[LLAMA_MODE]['description']}.", "magenta")
             continue
 
-        if not args and command == "/normal":
-            mode = NORMAL_MODE
-            print_status(f"Normal mode enabled: {MODE_CONFIGS[NORMAL_MODE]['description']}.", "cyan")
+        if not args and command == "/qwen":
+            mode = QWEN_MODE
+            print_status(f"Qwen mode enabled: {MODE_CONFIGS[QWEN_MODE]['description']}.", "cyan")
             continue
 
         if command == "/debug-retrieve":

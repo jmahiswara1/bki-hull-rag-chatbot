@@ -11,6 +11,7 @@ def ollama_setup_hint() -> str:
         "Ensure Ollama is running and the required models are available:\n"
         "  ollama pull qwen2.5:7b\n"
         "  ollama pull qwen2.5:3b\n"
+        "  ollama pull llama3.2:3b\n"
         "  ollama pull nomic-embed-text"
     )
 

@@ -61,7 +61,7 @@ Command CLI:
 /clear                   Clear screen and conversation history
 /fast                    Use qwen2.5:3b with grounded concise answers
 /llama                   Use llama3.2:3b with grounded concise answers
-/normal                  Use qwen2.5:7b fallback with deeper retrieval
+/qwen                    Use qwen2.5:7b fallback with deeper retrieval
 /debug-retrieve <q>      Show retrieved chunks and scores for a question
 /import-json [path]      Ask independent questions from JSON, default: data/questions.json
 /import-pdf [path]       Ask independent questions from PDF, default: data/testing.pdf
@@ -91,7 +91,7 @@ Jika tabel atau pertanyaan di PDF/DOCX berbentuk gambar, teks di dalam gambar ti
 
 Semua mode memakai guardrail yang sama: jawaban harus didukung retrieved context. Jika angka, formula, atau aturan tidak muncul jelas di context, chatbot diarahkan untuk mengatakan bahwa informasi tidak tersedia dalam context yang ditemukan.
 
-- `/normal` cocok untuk kualitas terbaik karena memakai model lebih besar dan retrieval lebih dalam.
+- `/qwen` cocok untuk kualitas terbaik karena memakai `qwen2.5:7b` dan retrieval lebih dalam.
 - `/fast` cocok untuk respons cepat dengan jawaban ringkas.
 - `/llama` cocok untuk pembanding cepat memakai `llama3.2:3b`.
 - `/debug-retrieve <q>` membantu melihat apakah halaman/chunk yang benar sudah terambil.
