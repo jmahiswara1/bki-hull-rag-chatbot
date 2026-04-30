@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -50,7 +51,63 @@ STOPWORDS = {
     "with",
 }
 
+TECHNICAL_TERMS = {
+    "allowance",
+    "bottom",
+    "bulkhead",
+    "construction",
+    "corrosion",
+    "deck",
+    "double",
+    "formula",
+    "frame",
+    "framing",
+    "girder",
+    "hatch",
+    "height",
+    "hull",
+    "longitudinal",
+    "maximum",
+    "minimum",
+    "modulus",
+    "opening",
+    "plate",
+    "plating",
+    "requirement",
+    "requirements",
+    "rule",
+    "scantling",
+    "section",
+    "shell",
+    "side",
+    "spacing",
+    "span",
+    "stiffener",
+    "strut",
+    "table",
+    "thickness",
+    "unsupported",
+    "web",
+    "alas",
+    "bukaan",
+    "ganda",
+    "haluan",
+    "jarak",
+    "ketebalan",
+    "konstruksi",
+    "palka",
+    "pelat",
+    "penegar",
+    "persyaratan",
+    "rumus",
+    "senta",
+    "sisi",
+    "tabel",
+    "tebal",
+}
 
+
+@lru_cache(maxsize=1)
 def load_vector_store() -> Chroma:
     if not CHROMA_DIR.exists() or not any(CHROMA_DIR.iterdir()):
         raise RuntimeError(
@@ -102,6 +159,44 @@ def extract_phrases(text: str) -> set[str]:
     return phrases
 
 
+def is_numeric_or_rule_query(query: str) -> bool:
+    lowered = query.lower()
+    markers = (
+        "berapa",
+        "minimum",
+        "maximum",
+        "formula",
+        "rumus",
+        "ratio",
+        "percentage",
+        "percent",
+        "table",
+        "tabel",
+        "requirement",
+        "persyaratan",
+        "rule",
+        "regulation",
+        "thickness",
+        "scantling",
+        "stiffener",
+        "bulkhead",
+        "section modulus",
+        "corrosion allowance",
+        "tebal",
+        "ketebalan",
+        "penegar",
+        "sekat",
+        "modulus",
+        "korosi",
+        "diameter",
+        "height",
+        "force",
+        "load",
+        "spacing",
+    )
+    return bool(extract_numeric_terms(query)) or any(marker in lowered for marker in markers)
+
+
 def copy_with_scores(document: Document, relevance_score: float, rerank_score: float) -> Document:
     metadata = dict(document.metadata)
     metadata["relevance_score"] = round(relevance_score, 4)
@@ -129,6 +224,7 @@ def rerank_documents(
     query_tokens = tokenize(query)
     query_numbers = extract_numeric_terms(query)
     query_phrases = extract_phrases(query)
+    numeric_query = is_numeric_or_rule_query(query)
     ranked: list[tuple[float, float, Document]] = []
 
     for document, relevance_score in candidates:
@@ -139,11 +235,24 @@ def rerank_documents(
         overlap_ratio = overlap / max(len(query_tokens), 1)
         number_matches = len(query_numbers & content_numbers)
         phrase_matches = sum(1 for phrase in query_phrases if phrase in content)
-        heading_bonus = 0.08 if any(word in content for word in ("table", "section", "sec.", "chapter")) else 0.0
-        numeric_bonus = 0.18 * number_matches
-        phrase_bonus = 0.06 * phrase_matches
+        technical_matches = len((query_tokens & TECHNICAL_TERMS) & content_tokens)
+        heading_bonus = 0.10 if re.search(r"\b(table|section|chapter|regulation|rule|requirements?)\b|\b(sec\.|pt\.|vol\.)", content) else 0.0
+        table_bonus = 0.14 if numeric_query and document.metadata.get("chunk_type") == "page_fallback" else 0.0
+        formula_bonus = 0.12 if numeric_query and any(symbol in content for symbol in ("=", "≤", ">=", "<", ">")) else 0.0
+        numeric_bonus = 0.22 * number_matches
+        technical_bonus = min(0.20, 0.05 * technical_matches)
+        phrase_bonus = min(0.18, 0.06 * phrase_matches)
         lexical_bonus = 0.45 * overlap_ratio
-        rerank_score = float(relevance_score) + lexical_bonus + numeric_bonus + phrase_bonus + heading_bonus
+        rerank_score = (
+            float(relevance_score)
+            + lexical_bonus
+            + numeric_bonus
+            + technical_bonus
+            + phrase_bonus
+            + heading_bonus
+            + table_bonus
+            + formula_bonus
+        )
         ranked.append((rerank_score, float(relevance_score), document))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -151,7 +260,7 @@ def rerank_documents(
     selected: list[Document] = []
     seen_chunks: set[tuple[str, str, str]] = set()
     page_counts: dict[tuple[str, str], int] = {}
-    max_chunks_per_page = 2
+    max_chunks_per_page = 3 if numeric_query else 2
 
     for rerank_score, relevance_score, document in ranked:
         source = str(document.metadata.get("source", ""))

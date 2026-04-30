@@ -22,13 +22,15 @@ def get_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL) -> OllamaEmbedding
 def get_llm(
     model_name: str = DEFAULT_LLM_MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
+    **model_kwargs,
 ) -> ChatOllama:
-    return ChatOllama(model=model_name, temperature=temperature)
+    return ChatOllama(model=model_name, temperature=temperature, **model_kwargs)
 
 
 def get_llm_with_fallback(
     preferred_model: str = DEFAULT_LLM_MODEL,
     fallback_model: str = FALLBACK_LLM_MODEL,
+    **model_kwargs,
 ) -> ChatOllama:
     errors: list[str] = []
     model_names = [preferred_model]
@@ -37,7 +39,7 @@ def get_llm_with_fallback(
         model_names.append(fallback_model)
 
     for model_name in model_names:
-        llm = get_llm(model_name=model_name)
+        llm = get_llm(model_name=model_name, **model_kwargs)
         try:
             llm.invoke("Reply with OK only.")
             return llm

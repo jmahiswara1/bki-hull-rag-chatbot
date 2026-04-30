@@ -58,13 +58,13 @@ Command CLI:
 
 ```text
 /help                    Show help
-/clear                   Clear conversation history
+/clear                   Clear screen and conversation history
 /fast                    Use qwen2.5:3b with grounded concise answers
 /llama                   Use llama3.2:3b with grounded concise answers
 /normal                  Use qwen2.5:7b fallback with deeper retrieval
 /debug-retrieve <q>      Show retrieved chunks and scores for a question
 /import-json [path]      Ask independent questions from JSON, default: data/questions.json
-/import-pdf [path]       Ask independent questions from PDF, default: data/AI testing.pdf
+/import-pdf [path]       Ask independent questions from PDF, default: data/testing.pdf
 /quit                    Exit
 /exit                    Exit
 ```
@@ -80,7 +80,7 @@ Untuk menjalankan daftar pertanyaan di `data/questions.json`:
 Untuk menjalankan pertanyaan dari PDF testing:
 
 ```text
-/import-pdf "data/AI testing.pdf"
+/import-pdf "data/testing.pdf"
 ```
 
 Setiap pertanyaan JSON/PDF diproses secara independen agar hasil pertanyaan sebelumnya tidak memengaruhi retrieval pertanyaan berikutnya. PDF testing hanya dipakai sebagai sumber pertanyaan; jawaban tetap memakai vector store BKI Hull Rules.

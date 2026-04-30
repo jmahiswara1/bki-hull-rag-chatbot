@@ -25,7 +25,7 @@ except ImportError:
 
 from llm import FALLBACK_LLM_MODEL, get_llm_with_fallback
 from pdf_questions import load_questions_from_pdf
-from retriever import retrieve_candidates, retrieve_context, rerank_documents
+from retriever import is_numeric_or_rule_query, retrieve_candidates, retrieve_context, rerank_documents
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RICH_AVAILABLE = Console is not None
@@ -50,10 +50,11 @@ MODE_CONFIGS = {
         "description": "qwen2.5:3b, reranked retrieval, short history, grounded answers",
     },
     LLAMA_MODE: {
-        "candidate_k": 16,
+        "candidate_k": 36,
         "final_k": 5,
-        "history_turns": 3,
-        "description": "llama3.2:3b, reranked retrieval, short history, grounded answers",
+        "history_turns": 2,
+        "min_score": 0.18,
+        "description": "llama3.2:3b, stricter retrieval, compact grounded answers",
     },
 }
 
@@ -88,6 +89,60 @@ INDONESIAN_MARKERS = (
     " ketebalan ",
     " kapal ",
 )
+
+INDONESIAN_RULE_TERM_EXPANSIONS = (
+    (("tebal", "ketebalan"), ("thickness", "plate thickness")),
+    (("senta", "penegar", "stiffener"), ("stiffener", "longitudinal stiffener")),
+    (("jarak", "spasi"), ("spacing", "unsupported span")),
+    (("modulus",), ("section modulus",)),
+    (("pelat sisi",), ("side shell plating", "side plate")),
+    (("alas",), ("bottom", "bottom plating")),
+    (("double bottom", "dasar ganda"), ("double bottom",)),
+    (("strut",), ("strut", "support")),
+    (("palka", "bukaan palka"), ("hatch", "hatch opening")),
+    (("bulk carrier", "kapal curah"), ("bulk carrier", "dry cargo in bulk")),
+    (("haluan",), ("fore part", "fore end", "bow")),
+    (("persyaratan", "harus", "perlu"), ("requirement", "shall")),
+    (("minimum", "maksimum"), ("minimum", "maximum")),
+    (("rumus",), ("formula",)),
+    (("tabel",), ("table",)),
+    (("konstruksi memanjang",), ("longitudinal framing", "longitudinal construction")),
+)
+
+GENERIC_NON_ANSWER_PATTERNS = (
+    "secara umum",
+    "tergantung pada beberapa faktor",
+    "perlu mempertimbangkan",
+    "tidak dapat ditentukan",
+    "tidak dapat menjawab",
+    "informasi umum",
+    "bervariasi tergantung",
+    "mengacu pada aturan",
+    "based on several factors",
+    "depends on several factors",
+    "cannot determine",
+    "general information",
+)
+
+CONTEXT_MATCH_STOPWORDS = {
+    "adalah",
+    "agar",
+    "akan",
+    "atau",
+    "dalam",
+    "dan",
+    "dengan",
+    "jika",
+    "kapal",
+    "pada",
+    "untuk",
+    "yang",
+    "and",
+    "are",
+    "for",
+    "the",
+    "with",
+}
 
 
 def rich_escape(value: str) -> str:
@@ -168,17 +223,25 @@ def print_welcome() -> None:
     print_panel("BKI Hull Rules Chatbot CLI", body, "cyan")
 
 
+def clear_terminal() -> None:
+    if console is not None:
+        console.clear()
+        return
+
+    print("\033[2J\033[H", end="", flush=True)
+
+
 def print_help() -> None:
     if console is None or Table is None:
         print("Available commands:")
         print("  /help                    Show this help message")
-        print("  /clear                   Clear conversation history")
+        print("  /clear                   Clear screen and conversation history")
         print("  /fast                    Use qwen2.5:3b with grounded concise answers")
         print("  /llama                   Use llama3.2:3b with grounded concise answers")
         print("  /normal                  Use qwen2.5:7b fallback with deeper retrieval")
         print("  /debug-retrieve <q>      Show retrieved chunks and scores for a question")
         print("  /import-json [path]      Ask independent questions from JSON, default: data/questions.json")
-        print("  /import-pdf [path]       Ask independent questions from PDF, default: data/AI testing.pdf")
+        print("  /import-pdf [path]       Ask independent questions from PDF, default: data/testing.pdf")
         print("  /quit                    Exit the chatbot")
         print("  /exit                    Exit the chatbot")
         return
@@ -188,13 +251,13 @@ def print_help() -> None:
     table.add_column("Command", style="bold")
     table.add_column("Description")
     table.add_row("Conversation", "/help", "Show this help message")
-    table.add_row("Conversation", "/clear", "Clear conversation history")
+    table.add_row("Conversation", "/clear", "Clear screen and conversation history")
     table.add_row("Modes", "/fast", "Use qwen2.5:3b with grounded concise answers")
     table.add_row("Modes", "/llama", "Use llama3.2:3b with grounded concise answers")
     table.add_row("Modes", "/normal", "Use qwen2.5:7b fallback with deeper retrieval")
     table.add_row("Retrieval", "/debug-retrieve <q>", "Show retrieved chunks and scores for a question")
     table.add_row("Import", rich_escape("/import-json [path]"), "Ask independent questions from JSON, default: data/questions.json")
-    table.add_row("Import", rich_escape("/import-pdf [path]"), "Ask independent questions from PDF, default: data/AI testing.pdf")
+    table.add_row("Import", rich_escape("/import-pdf [path]"), "Ask independent questions from PDF, default: data/testing.pdf")
     table.add_row("Exit", "/quit", "Exit the chatbot")
     table.add_row("Exit", "/exit", "Exit the chatbot")
     console.print(table)
@@ -232,6 +295,11 @@ def get_cached_llm(mode: str, llm_cache: dict[str, Any]) -> Any:
         llm_cache[mode] = get_llm_with_fallback(
             preferred_model=LLAMA_MODEL,
             fallback_model=LLAMA_MODEL,
+            num_ctx=4096,
+            num_predict=350,
+            top_p=0.2,
+            top_k=20,
+            repeat_penalty=1.05,
         )
     else:
         llm_cache[mode] = get_llm_with_fallback()
@@ -253,16 +321,41 @@ def is_follow_up_question(query: str) -> bool:
     return any(marker in normalized_query for marker in FOLLOW_UP_MARKERS)
 
 
+def expand_indonesian_rule_terms(query: str) -> str:
+    lowered = query.lower()
+    expanded_terms: list[str] = []
+    seen: set[str] = set()
+
+    for triggers, terms in INDONESIAN_RULE_TERM_EXPANSIONS:
+        if not any(trigger in lowered for trigger in triggers):
+            continue
+
+        for term in terms:
+            if term in seen:
+                continue
+
+            seen.add(term)
+            expanded_terms.append(term)
+
+    return ", ".join(expanded_terms)
+
+
 def build_retrieval_query(
     query: str,
     history: list[tuple[str, str]],
     use_history: bool,
 ) -> str:
     if not use_history or not history or not is_follow_up_question(query):
-        return query
+        retrieval_query = query
+    else:
+        last_user_message = history[-1][0]
+        retrieval_query = f"Previous user question: {last_user_message}\nCurrent user question: {query}"
 
-    last_user_message = history[-1][0]
-    return f"Previous user question: {last_user_message}\nCurrent user question: {query}"
+    expanded_terms = expand_indonesian_rule_terms(retrieval_query)
+    if not expanded_terms:
+        return retrieval_query
+
+    return f"{retrieval_query}\nRelated BKI English terms: {expanded_terms}"
 
 
 def format_history(
@@ -281,7 +374,7 @@ def format_history(
     return "\n".join(lines)
 
 
-def format_context(documents: list[Document]) -> str:
+def format_context(documents: list[Document], query: str = "") -> str:
     if not documents:
         return "No relevant context was retrieved."
 
@@ -290,24 +383,29 @@ def format_context(documents: list[Document]) -> str:
         source = document.metadata.get("source", "unknown source")
         page = document.metadata.get("page", "unknown page")
         chunk_index = document.metadata.get("chunk_index", "unknown chunk")
+        chunk_type = document.metadata.get("chunk_type", "unknown type")
         relevance_score = document.metadata.get("relevance_score", "n/a")
         rerank_score = document.metadata.get("rerank_score", "n/a")
         content = document.page_content.strip()
+        matched_terms = matched_context_terms(query, content)
         chunks.append(
             f"[Source {index} | {source} | page {page} | chunk {chunk_index} | "
-            f"score {relevance_score} | rerank {rerank_score}]\n{content}"
+            f"type {chunk_type} | score {relevance_score} | rerank {rerank_score}]\n"
+            f"Matched query terms: {matched_terms}\n"
+            f"Text:\n{content}"
         )
 
     return "\n\n".join(chunks)
 
 
-def collect_sources(documents: list[Document]) -> list[tuple[int, str, str]]:
+def collect_sources(documents: list[Document]) -> list[tuple[int, str, str, str]]:
     seen: set[tuple[str, str]] = set()
-    sources: list[tuple[int, str, str]] = []
+    sources: list[tuple[int, str, str, str]] = []
 
     for document in documents:
         source = str(document.metadata.get("source", "unknown source"))
         page = str(document.metadata.get("page", "unknown page"))
+        rerank_score = str(document.metadata.get("rerank_score", "n/a"))
         key = (source, page)
 
         if key in seen:
@@ -320,7 +418,7 @@ def collect_sources(documents: list[Document]) -> list[tuple[int, str, str]]:
         except ValueError:
             page_number = sys.maxsize
 
-        sources.append((page_number, source, page))
+        sources.append((page_number, source, page, rerank_score))
 
     return sorted(sources)
 
@@ -331,7 +429,10 @@ def format_sources(documents: list[Document]) -> str:
     if not sources:
         return ""
 
-    lines = [f"- {source}, page {page}" for _, source, page in sources]
+    lines = [
+        f"- {source}, page {page}, rerank {rerank_score}"
+        for _, source, page, rerank_score in sources
+    ]
     return "Sources:\n" + "\n".join(lines)
 
 
@@ -348,9 +449,10 @@ def print_sources(documents: list[Document]) -> None:
     table = Table(title="Sources", show_header=True, header_style="bold cyan")
     table.add_column("Source")
     table.add_column("Page", justify="right")
+    table.add_column("Rerank", justify="right")
 
-    for _, source, page in sources:
-        table.add_row(source, page)
+    for _, source, page, rerank_score in sources:
+        table.add_row(source, page, rerank_score)
 
     console.print(table)
 
@@ -376,7 +478,7 @@ def resolve_json_path(path_text: str) -> Path:
 
 
 def resolve_pdf_path(path_text: str) -> Path:
-    return resolve_input_path(path_text, "data/AI testing.pdf")
+    return resolve_input_path(path_text, "data/testing.pdf")
 
 
 def load_questions_from_json(file_path: Path) -> list[str]:
@@ -406,6 +508,24 @@ def tokenize(text: str) -> set[str]:
     return set(re.findall(r"[a-zA-Z0-9]+(?:[.,][0-9]+)?", text.lower()))
 
 
+def matched_context_terms(query: str, content: str) -> str:
+    if not query:
+        return "n/a"
+
+    query_tokens = {
+        token
+        for token in tokenize(query)
+        if len(token) >= 3 and token not in CONTEXT_MATCH_STOPWORDS
+    }
+    content_tokens = tokenize(content)
+    matches = sorted(query_tokens & content_tokens)
+
+    if not matches:
+        return "none"
+
+    return ", ".join(matches[:12])
+
+
 def context_quality_note(query: str, documents: list[Document]) -> str:
     if not documents:
         return "Context quality: weak. No relevant context was retrieved."
@@ -426,6 +546,17 @@ def context_quality_note(query: str, documents: list[Document]) -> str:
             "If the answer is not explicit, say it is not available in the retrieved context."
         )
 
+    if is_numeric_or_rule_query(query):
+        context_text = "\n".join(document.page_content.lower() for document in documents)
+        has_rule_evidence = bool(
+            re.search(r"\d|=|≤|>=|<|>|\b(table|formula|minimum|maximum|shall|requirement)\b", context_text)
+        )
+        if not has_rule_evidence:
+            return (
+                "Context quality: weak for a numeric or rule question. The retrieved chunks may mention the topic "
+                "but not the requested value, formula, table, or condition. If the answer is not explicit, say it is not available."
+            )
+
     return f"Context quality: usable. Top relevance score: {top_relevance:.4f}. Top rerank score: {top_rerank:.4f}."
 
 
@@ -437,11 +568,18 @@ def build_prompt(
     use_history: bool,
 ) -> str:
     response_language = get_response_language(query)
-    answer_style = (
-        "Answer clearly in 1-2 short paragraphs. This mode prioritizes speed, but the answer must still be complete enough to be useful."
-        if mode in {FAST_MODE, LLAMA_MODE}
-        else "Answer clearly with enough technical context to justify the result."
-    )
+    if mode == LLAMA_MODE:
+        answer_style = (
+            "Answer in 1 short paragraph or up to 3 bullets. First identify the single retrieved source chunk that directly answers the question. "
+            "Use other chunks only for required conditions or exceptions. For numeric or rule questions, state the exact requirement, value, formula, "
+            "and applicable condition found in the context. For Indonesian questions, answer in Bahasa Indonesia but preserve BKI technical terms, "
+            "formulas, units, table names, and symbols exactly as shown. If the retrieved chunks do not explicitly contain the requested value, "
+            "formula, or condition, say it is not available in the retrieved BKI Hull Rules context."
+        )
+    elif mode == FAST_MODE:
+        answer_style = "Answer clearly in 1-2 short paragraphs. This mode prioritizes speed, but the answer must still be complete enough to be useful."
+    else:
+        answer_style = "Answer clearly with enough technical context to justify the result."
 
     return f"""
 You are a technical assistant for BKI Rules for Hull 2026.
@@ -453,6 +591,8 @@ Grounding rules that apply to every mode:
 - If a requested value, formula, ratio, percentage, time, force, height, diameter, or rule condition is not explicit in the retrieved context, do not estimate, infer, or fabricate it.
 - If context is incomplete or weak, say that the information is not available in the retrieved BKI Hull Rules context.
 - Do not cite sections, pages, tables, formulas, or values that are not present in the retrieved context.
+- For numeric, table, formula, or requirement questions, prefer exact wording and conditions from the retrieved context over paraphrase.
+- If retrieved chunks appear to describe different cases and the question does not specify which case applies, state the ambiguity instead of choosing one.
 - Conversation history may only clarify follow-up references, not provide factual evidence.
 
 Answer format:
@@ -464,7 +604,48 @@ Answer format:
 {context_quality_note(query, documents)}
 
 Retrieved context:
-{format_context(documents)}
+{format_context(documents, query)}
+
+Conversation history:
+{format_history(history, get_history_limit(mode), use_history)}
+
+User question:
+{query}
+
+Assistant answer:
+""".strip()
+
+
+def is_generic_non_answer(answer: str) -> bool:
+    normalized_answer = answer.lower()
+    return any(pattern in normalized_answer for pattern in GENERIC_NON_ANSWER_PATTERNS)
+
+
+def build_strict_extraction_prompt(
+    query: str,
+    documents: list[Document],
+    history: list[tuple[str, str]],
+    mode: str,
+    use_history: bool,
+) -> str:
+    response_language = get_response_language(query)
+    return f"""
+You are a technical assistant for BKI Rules for Hull 2026.
+Required answer language: {response_language}.
+The previous response was too generic. Extract the exact answer from the retrieved context.
+
+Rules:
+- Use only the retrieved context as evidence.
+- Select the one source chunk that directly answers the question.
+- Use other chunks only for conditions, exceptions, or scope.
+- Preserve formulas, values, units, symbols, table names, and BKI technical terms exactly as shown.
+- If the retrieved context does not explicitly contain the requested value, formula, or condition, say only that it is not available in the retrieved BKI Hull Rules context.
+- Do not provide general ship-construction guidance.
+
+{context_quality_note(query, documents)}
+
+Retrieved context:
+{format_context(documents, query)}
 
 Conversation history:
 {format_history(history, get_history_limit(mode), use_history)}
@@ -482,19 +663,41 @@ def generate_answer(
     llm: Any,
     mode: str,
     use_history: bool,
-) -> tuple[str, list[Document]]:
+) -> tuple[str, list[Document], dict[str, float]]:
+    timings: dict[str, float] = {}
     config = get_mode_config(mode)
     retrieval_query = build_retrieval_query(query, history, use_history)
+
+    retrieval_started_at = time.perf_counter()
     documents = retrieve_context(
         retrieval_query,
         candidate_k=int(config["candidate_k"]),
         final_k=int(config["final_k"]),
+        min_score=config.get("min_score"),
     )
+    timings["retrieval"] = time.perf_counter() - retrieval_started_at
+
+    prompt_started_at = time.perf_counter()
     prompt = build_prompt(query, documents, history, mode, use_history)
+    timings["prompt"] = time.perf_counter() - prompt_started_at
+
+    generation_started_at = time.perf_counter()
     response = llm.invoke(prompt)
+    timings["generation"] = time.perf_counter() - generation_started_at
     answer = getattr(response, "content", str(response)).strip()
 
-    return answer, documents
+    if mode == LLAMA_MODE and is_numeric_or_rule_query(query) and is_generic_non_answer(answer):
+        retry_prompt = build_strict_extraction_prompt(query, documents, history, mode, use_history)
+        retry_started_at = time.perf_counter()
+        retry_response = llm.invoke(retry_prompt)
+        retry_seconds = time.perf_counter() - retry_started_at
+        retry_answer = getattr(retry_response, "content", str(retry_response)).strip()
+        timings["generation"] += retry_seconds
+        timings["retry_generation"] = retry_seconds
+        if retry_answer:
+            answer = retry_answer
+
+    return answer, documents, timings
 
 
 def answer_user_question(
@@ -509,8 +712,10 @@ def answer_user_question(
 
     try:
         with show_loading():
+            llm_started_at = time.perf_counter()
             llm = get_cached_llm(mode, llm_cache)
-            answer, documents = generate_answer(user_input, history, llm, mode, use_history)
+            llm_init_seconds = time.perf_counter() - llm_started_at
+            answer, documents, timings = generate_answer(user_input, history, llm, mode, use_history)
     except Exception as exc:
         elapsed_seconds = time.perf_counter() - started_at
         print_error(f"Error after {elapsed_seconds:.2f} seconds: {exc}")
@@ -525,7 +730,17 @@ def answer_user_question(
         renderable = Markdown(answer) if Markdown is not None else answer
         console.print(Panel(renderable, title="Assistant", border_style="cyan"))
 
-    print_status(f"Response time: {elapsed_seconds:.2f} secs", "dim")
+    timings["llm_init"] = llm_init_seconds
+    timings["total"] = elapsed_seconds
+    print_status(
+        "Timing: "
+        f"llm init {timings['llm_init']:.2f}s | "
+        f"retrieval {timings['retrieval']:.2f}s | "
+        f"prompt {timings['prompt']:.2f}s | "
+        f"generation {timings['generation']:.2f}s | "
+        f"total {timings['total']:.2f}s",
+        "dim",
+    )
     print_sources(documents)
 
     if not append_history:
@@ -607,27 +822,53 @@ def print_retrieval_debug(question: str, mode: str) -> None:
         return
 
     config = get_mode_config(mode)
-    candidates = retrieve_candidates(question, candidate_k=int(config["candidate_k"]))
-    documents = rerank_documents(question, candidates, final_k=int(config["final_k"]))
+    retrieval_query = build_retrieval_query(question, [], False)
+    retrieval_started_at = time.perf_counter()
+    candidates = retrieve_candidates(retrieval_query, candidate_k=int(config["candidate_k"]))
+    documents = rerank_documents(retrieval_query, candidates, final_k=int(config["final_k"]))
+    min_score = config.get("min_score")
+    if min_score is not None:
+        documents = [
+            document
+            for document in documents
+            if float(document.metadata.get("rerank_score", 0.0)) >= min_score
+        ]
+    retrieval_seconds = time.perf_counter() - retrieval_started_at
+    numeric_query = is_numeric_or_rule_query(question)
 
     if not documents:
         print_status("No retrieved chunks.", "yellow")
         return
 
-    print_panel("Retrieval debug", f"Mode: {mode}\nQuery: {question}", "magenta")
+    debug_body = "\n".join(
+        [
+            f"Mode: {mode}",
+            f"Query: {question}",
+            f"Retrieval query: {retrieval_query}",
+            f"Numeric/rule query: {numeric_query}",
+            f"Candidates: {len(candidates)}",
+            f"Final chunks: {len(documents)}",
+            f"Retrieval + rerank: {retrieval_seconds:.2f}s",
+        ]
+    )
+    print_panel("Retrieval debug", debug_body, "magenta")
 
     for index, document in enumerate(documents, start=1):
         source = document.metadata.get("source", "unknown source")
         page = document.metadata.get("page", "unknown page")
         chunk_index = document.metadata.get("chunk_index", "unknown chunk")
+        chunk_type = document.metadata.get("chunk_type", "unknown type")
+        chunk_length = document.metadata.get("chunk_length", "unknown length")
         relevance_score = document.metadata.get("relevance_score", "n/a")
         rerank_score = document.metadata.get("rerank_score", "n/a")
-        preview = re.sub(r"\s+", " ", document.page_content.strip())[:500]
+        preview = re.sub(r"\s+", " ", document.page_content.strip())[:900]
         body = "\n".join(
             [
                 f"source: {source}",
                 f"page: {page}",
                 f"chunk: {chunk_index}",
+                f"chunk_type: {chunk_type}",
+                f"chunk_length: {chunk_length}",
                 f"score: {relevance_score}",
                 f"rerank: {rerank_score}",
                 "",
@@ -667,7 +908,9 @@ def chat_loop() -> int:
 
         if not args and command == "/clear":
             history.clear()
-            print_status("Conversation history cleared.", "green")
+            clear_terminal()
+            print_welcome()
+            print_status("Conversation history and screen cleared.", "green")
             continue
 
         if not args and command == "/fast":
